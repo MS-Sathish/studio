@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useState, useEffect, type FormEvent } from 'react';
@@ -10,7 +11,8 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { LogIn, WalletCards, Send, Loader2, CheckCircle2, AlertCircle, Coins } from 'lucide-react';
+import { Skeleton } from "@/components/ui/skeleton";
+import { LogIn, WalletCards, Send, Loader2, CheckCircle2, AlertCircle, Coins, UserCircle2 } from 'lucide-react';
 
 declare global {
   interface Window {
@@ -22,11 +24,14 @@ export default function EthSender() {
   const [provider, setProvider] = useState<BrowserProvider | null>(null);
   const [signer, setSigner] = useState<Signer | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [ss58Address, setSs58Address] = useState<string | null>(null);
+  const [userLoading, setUserLoading] = useState<boolean>(false);
+  const [userError, setUserError] = useState<string | null>(null);
   
   const [transactionType, setTransactionType] = useState<'eth' | 'erc20'>('eth');
   const [tokenContractAddress, setTokenContractAddress] = useState<string>('');
   const [amount, setAmount] = useState<string>('');
-  const [gasLimit, setGasLimit] = useState<string>('200000'); // Default gas limit, increased for potential ERC20 approve + transfer
+  const [gasLimit, setGasLimit] = useState<string>('200000'); 
   
   const [transactionHash, setTransactionHash] = useState<string | null>(null);
   const [transactionStatus, setTransactionStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
@@ -35,35 +40,92 @@ export default function EthSender() {
 
   const { toast } = useToast();
 
+  const loadAndDisplayUserData = async (evmAddress: string) => {
+    setUserLoading(true);
+    setSs58Address(null);
+    setUserError(null);
+    try {
+      // 1. Try to GET user
+      const getUserResponse = await fetch(`/api/user?evmAddress=${evmAddress}`);
+      
+      if (getUserResponse.ok) {
+        const data = await getUserResponse.json();
+        setSs58Address(data.user.ss58Address);
+        setWalletAddress(data.user.evmAddress); // Ensure walletAddress is also from API response
+        toast({ title: "User Data Loaded", description: `Displaying data for ${data.user.evmAddress.substring(0,6)}...` });
+      } else if (getUserResponse.status === 404) {
+        // 2. If user not found (404), POST to create user
+        toast({ title: "Creating User Account", description: "No existing user found, creating new account..." });
+        const createUserResponse = await fetch('/api/user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ evmAddress }), // bitcoinAddress is optional
+        });
+        const createData = await createUserResponse.json();
+        if (createUserResponse.ok) { // Handles 200 (found during create) or 201 (newly created)
+          setSs58Address(createData.user.ss58Address);
+          setWalletAddress(createData.user.evmAddress);
+          toast({ title: "User Account Ready", description: `Account for ${createData.user.evmAddress.substring(0,6)}... is ready.` });
+        } else {
+          setUserError(createData.error || "Failed to create user account.");
+          toast({ title: "Account Creation Error", description: createData.error || "Could not create user account.", variant: "destructive" });
+        }
+      } else {
+        // Other GET error
+        const errorData = await getUserResponse.json();
+        setUserError(errorData.error || "Failed to fetch user data.");
+        toast({ title: "User Data Error", description: errorData.error || "Could not fetch user data.", variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Error loading user data:", error);
+      const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
+      setUserError(`Network error or invalid response: ${errorMessage}`);
+      toast({ title: "Network Error", description: "Could not connect to API to load user data.", variant: "destructive" });
+    } finally {
+      setUserLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (typeof window.ethereum !== 'undefined') {
       const newProvider = new ethers.BrowserProvider(window.ethereum);
       setProvider(newProvider);
 
-      const handleAccountsChanged = (accounts: string[]) => {
+      const handleAccountsChanged = async (accounts: string[]) => {
         if (accounts.length === 0) {
           setWalletAddress(null);
           setSigner(null);
+          setSs58Address(null);
+          setUserLoading(false);
+          setUserError(null);
+          setChainName(null);
           toast({ title: "Wallet Disconnected", description: "Please connect your wallet.", variant: "destructive" });
         } else {
-          setWalletAddress(accounts[0]);
-          newProvider.getSigner().then(setSigner);
+          const newAddress = accounts[0];
+          // setWalletAddress(newAddress); // Temporarily set for immediate UI, loadAndDisplayUserData will confirm
+          const newSigner = await newProvider.getSigner();
+          setSigner(newSigner);
+          await loadAndDisplayUserData(newAddress); // This will also setWalletAddress
+          const network = await newProvider.getNetwork(); // Get network info after potentially new signer
+          setChainName(network.name);
         }
       };
 
       const handleChainChanged = async (_chainId: string) => {
-        toast({ title: "Network Changed", description: "Please ensure you are on the correct network."});
+        toast({ title: "Network Changed", description: "Reloading due to network change. Please reconnect if needed."});
         window.location.reload(); 
       };
       
       window.ethereum.on('accountsChanged', handleAccountsChanged);
       window.ethereum.on('chainChanged', handleChainChanged);
 
-      newProvider.listAccounts().then(async (accountsSigners) => {
-        if (accountsSigners.length > 0) {
-          const currentSigner = accountsSigners[0];
-          setWalletAddress(currentSigner.address); 
+      newProvider.listAccounts().then(async (signers: Signer[]) => {
+        if (signers.length > 0) {
+          const currentSigner = signers[0];
+          const address = await currentSigner.getAddress();
+          // setWalletAddress(address); // Temporarily set for immediate UI, loadAndDisplayUserData will confirm
           setSigner(currentSigner);
+          await loadAndDisplayUserData(address); // This will also setWalletAddress
           const network = await newProvider.getNetwork();
           setChainName(network.name);
         }
@@ -76,7 +138,8 @@ export default function EthSender() {
     } else {
       toast({ title: "MetaMask Not Found", description: "Please install MetaMask to use this application.", variant: "destructive" });
     }
-  }, [toast]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toast]); // loadAndDisplayUserData is stable due to useCallback or if defined outside/passed in deps
 
   const connectWallet = async () => {
     if (!provider) {
@@ -86,12 +149,13 @@ export default function EthSender() {
     try {
       await provider.send("eth_requestAccounts", []);
       const currentSigner = await provider.getSigner();
-      setSigner(currentSigner);
       const address = await currentSigner.getAddress();
-      setWalletAddress(address);
+      setSigner(currentSigner);
+      // setWalletAddress(address); // Temporarily set, loadAndDisplayUserData will confirm
+      await loadAndDisplayUserData(address);
       const network = await provider.getNetwork();
       setChainName(network.name);
-      toast({ title: "Wallet Connected", description: `Connected to ${network.name} with address ${address}` });
+      // Toast for wallet connected handled by loadAndDisplayUserData success path
     } catch (error) {
       console.error("Error connecting wallet:", error);
       toast({ title: "Connection Error", description: "Failed to connect wallet. Please try again.", variant: "destructive" });
@@ -115,6 +179,7 @@ export default function EthSender() {
 
     setTransactionStatus('pending');
     setTransactionHash(null);
+    setStatusMessage(null);
 
     if (transactionType === 'eth') {
       setStatusMessage("Preparing ETH transaction...");
@@ -175,7 +240,6 @@ export default function EthSender() {
         }
         const amountToSend = ethers.parseUnits(amount, Number(decimals));
 
-        // 1. Approve
         setStatusMessage(`Approving ${amount} tokens for the bridge contract... Please confirm in MetaMask.`);
         const approveTx: ContractTransactionResponse = await erc20Contract.approve(CONTRACT_ADDRESS, amountToSend);
         setTransactionHash(approveTx.hash);
@@ -189,7 +253,6 @@ export default function EthSender() {
           return;
         }
 
-        // 2. Deposit ERC20
         setStatusMessage(`Approval successful! Depositing ${amount} tokens... Please confirm in MetaMask.`);
         const depositTx: ContractTransactionResponse = await bridgeContract.depositERC20(tokenContractAddress, amountToSend, {
             gasLimit: BigInt(gasLimit) 
@@ -231,18 +294,39 @@ export default function EthSender() {
       <Card className="shadow-xl rounded-lg">
         <CardHeader>
           <CardTitle className="text-2xl flex items-center">
-            <WalletCards className="mr-2 h-6 w-6 text-primary" /> Wallet Information
+            <UserCircle2 className="mr-2 h-6 w-6 text-primary" /> User &amp; Wallet
           </CardTitle>
-          <CardDescription>Connect your MetaMask wallet to proceed.</CardDescription>
+          <CardDescription>Connect your MetaMask wallet to view details and proceed.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {walletAddress ? (
             <div className="space-y-2">
               <p className="text-sm font-medium">Status: <span className="text-accent font-semibold">Connected</span></p>
-              <p className="text-sm font-medium">Address: <span className="text-foreground/80 font-semibold break-all">{walletAddress}</span></p>
+              <p className="text-sm font-medium">EVM Address: <span className="text-foreground/80 font-semibold break-all">{walletAddress}</span></p>
+              
+              {userLoading && (
+                <div className="space-y-1">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-4 w-1/2" />
+                </div>
+              )}
+              {userError && !userLoading && (
+                <Alert variant="destructive" className="p-2 text-xs rounded-md">
+                  <div className="flex items-center">
+                    <AlertCircle className="h-4 w-4 mr-1" /> 
+                    <AlertDescription>{userError}</AlertDescription>
+                  </div>
+                </Alert>
+              )}
+              {ss58Address && !userLoading && !userError && (
+                <p className="text-sm font-medium">
+                  Clarus SS58 Address: <span className="text-accent font-semibold break-all">{ss58Address}</span>
+                </p>
+              )}
+              
               {chainName && <p className="text-sm font-medium">Network: <span className="text-foreground/80 font-semibold">{chainName}</span></p>}
               <Button variant="outline" onClick={connectWallet} className="w-full mt-2">
-                Reconnect / Switch Account
+                <LogIn className="mr-2 h-4 w-4" /> Reconnect / Switch Account
               </Button>
             </div>
           ) : (
@@ -253,7 +337,7 @@ export default function EthSender() {
         </CardContent>
       </Card>
 
-      {walletAddress && (
+      {walletAddress && ss58Address && !userLoading && !userError && (
         <Card className="shadow-xl rounded-lg">
           <CardHeader>
             <CardTitle className="text-2xl flex items-center">
@@ -280,7 +364,7 @@ export default function EthSender() {
                 value={transactionType} 
                 onValueChange={(value: 'eth' | 'erc20') => {
                   setTransactionType(value);
-                  setStatusMessage(null); // Clear status on type change
+                  setStatusMessage(null);
                   setTransactionStatus('idle');
                 }} 
                 className="flex space-x-4 mb-4"
@@ -356,9 +440,9 @@ export default function EthSender() {
       {statusMessage && (
         <Alert 
           variant={transactionStatus === 'error' ? 'destructive' : transactionStatus === 'success' ? 'default' : 'default'} 
-          className={transactionStatus === 'success' ? 'bg-accent text-accent-foreground border-accent rounded-lg' : 'rounded-lg'}
+          className={`${transactionStatus === 'success' ? 'bg-accent text-accent-foreground border-accent' : ''} rounded-lg`}
         >
-          {transactionStatus === 'success' && <CheckCircle2 className="h-5 w-5" />}
+          {transactionStatus === 'success' && <CheckCircle2 className="h-5 w-5 text-current" />}
           {transactionStatus === 'error' && <AlertCircle className="h-5 w-5" />}
           {transactionStatus === 'pending' && <Loader2 className="h-5 w-5 animate-spin" />}
           <AlertTitle className="ml-2 font-semibold">
